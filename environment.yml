@@ -1,0 +1,11 @@
+name: causal-sim
+channels:
+  - defaults
+dependencies:
+  - python
+  - pip
+  - pip:
+    - numpy
+    - torch --index-url https://download.pytorch.org/whl/cpu
+    - matplotlib
+    - scikit-learn
