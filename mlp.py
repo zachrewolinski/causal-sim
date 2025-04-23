@@ -193,7 +193,7 @@ def get_batch(
                                 torch.zeros_like(p) + 1.0 - dropout_prob
                             )
 
-        def forward(self):
+        def forward(self, causes=None):
             def sample_normal():
                 if self.pre_sample_causes:
                     causes = torch.normal(
@@ -205,68 +205,76 @@ def get_batch(
                     ).float()
                 return causes
 
-            if self.sampling == "normal":
-                causes = sample_normal()
-            elif self.sampling == "mixed":
-                zipf_p, multi_p, normal_p = (
-                    random.random() * 0.66,
-                    random.random() * 0.66,
-                    random.random() * 0.66,
-                )
+            if causes is None:
+                if self.sampling == "normal":
+                    causes = sample_normal()
+                elif self.sampling == "mixed":
+                    zipf_p, multi_p, normal_p = (
+                        random.random() * 0.66,
+                        random.random() * 0.66,
+                        random.random() * 0.66,
+                    )
 
-                def sample_cause(n):
-                    if random.random() > normal_p:
-                        if self.pre_sample_causes:
-                            return torch.normal(
-                                self.causes_mean[:, :, n],
-                                self.causes_std[:, :, n].abs(),
-                            ).float()
+                    def sample_cause(n):
+                        if random.random() > normal_p:
+                            if self.pre_sample_causes:
+                                return torch.normal(
+                                    self.causes_mean[:, :, n],
+                                    self.causes_std[:, :, n].abs(),
+                                ).float()
+                            else:
+                                return torch.normal(
+                                    0.0, 1.0, (seq_len, 1), device=device
+                                ).float()
+                        elif random.random() > multi_p:
+                            x = (
+                                torch.multinomial(
+                                    torch.rand((random.randint(2, 10))),
+                                    seq_len,
+                                    replacement=True,
+                                )
+                                .to(device)
+                                .unsqueeze(-1)
+                                .float()
+                            )
+                            x = (x - torch.mean(x)) / torch.std(x)
+                            return x
                         else:
-                            return torch.normal(
-                                0.0, 1.0, (seq_len, 1), device=device
-                            ).float()
-                    elif random.random() > multi_p:
-                        x = (
-                            torch.multinomial(
-                                torch.rand((random.randint(2, 10))),
-                                seq_len,
-                                replacement=True,
+                            x = torch.minimum(
+                                torch.tensor(
+                                    np.random.zipf(
+                                        2.0 + random.random() * 2, size=(seq_len)
+                                    ),
+                                    device=device,
+                                )
+                                .unsqueeze(-1)
+                                .float(),
+                                torch.tensor(10.0, device=device),
                             )
-                            .to(device)
-                            .unsqueeze(-1)
-                            .float()
-                        )
-                        x = (x - torch.mean(x)) / torch.std(x)
-                        return x
-                    else:
-                        x = torch.minimum(
-                            torch.tensor(
-                                np.random.zipf(
-                                    2.0 + random.random() * 2, size=(seq_len)
-                                ),
-                                device=device,
-                            )
-                            .unsqueeze(-1)
-                            .float(),
-                            torch.tensor(10.0, device=device),
-                        )
-                        return x - torch.mean(x)
+                            return x - torch.mean(x)
 
-                causes = torch.cat(
-                    [sample_cause(n).unsqueeze(-1) for n in range(self.num_causes)], -1
-                )
-            elif self.sampling == "uniform":
-                causes = torch.rand((seq_len, 1, self.num_causes), device=device)
+                    causes = torch.cat(
+                        [sample_cause(n).unsqueeze(-1) for n in range(self.num_causes)], -1
+                    )
+                elif self.sampling == "uniform":
+                    causes = torch.rand((seq_len, 1, self.num_causes), device=device)
+                else:
+                    raise ValueError(f"Sampling is set to invalid setting: {sampling}.")
             else:
-                raise ValueError(f"Sampling is set to invalid setting: {sampling}.")
+                n_inputs = len(causes)
+                weights = np.ones(n_inputs)
+                causes_w = [c*w for c,w in zip(causes,weights)]
+                causes = torch.cat(causes_w, axis=0)
 
+            # feed forward
             outputs = [causes]
             for layer in self.layers:
                 outputs.append(layer(outputs[-1]))
             outputs = outputs[2:]
 
             if self.is_causal:
-                ## Sample nodes from graph if model is causal
+                # This means that covariates X are sampled from inner layers of the MLP
+                # (and something happens to Y)
                 outputs_flat = torch.cat(outputs, -1)
 
                 if self.in_clique:
@@ -278,11 +286,13 @@ def get_batch(
                         outputs_flat.shape[-1] - 1, device=device
                     )
 
-                random_idx_y = (
-                    list(range(-num_outputs, -0))
-                    if self.y_is_effect
-                    else random_perm[0:num_outputs]
-                )
+                # if y_is_effect, then y is the output layer of the MLP
+                if self.y_is_effect:
+                    random_idx_y = list(range(-num_outputs, -0))
+                # otherwise, y is some random nodes from the permutation
+                else:
+                    random_idx_y = random_perm[0:num_outputs]
+                
                 random_idx = random_perm[num_outputs : num_outputs + num_features]
 
                 if self.sort_features:
@@ -291,8 +301,14 @@ def get_batch(
 
                 x = outputs_flat[:, :, random_idx]
             else:
-                y = outputs[-1][:, :, :]
+                # If not is_causal, covariates X are just the input layer of the MLP
+                # (i.e. what was generated by sample_cause). Effectively, the covariates
+                # will be independent.
                 x = causes
+                # Also, y_is_effect doesn't affect anything in this condition, y will just
+                # be the output layer of the MLP
+                y = outputs[-1][:, :, :]
+                
 
             if any_nan_torch(x) or any_nan_torch(y):
                 print(
