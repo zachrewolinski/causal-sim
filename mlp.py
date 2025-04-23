@@ -36,6 +36,7 @@ def get_batch(
     num_outputs=1,
     sampling="normal",
     epoch=None,
+    causes=None,
     **kwargs,
 ):
     if (
@@ -355,8 +356,10 @@ def get_batch(
     else:
         model = MLP(hyperparameters).to(device)
         get_model = lambda: model
-
-    sample = [get_model()() for _ in range(0, batch_size)]
+    if causes is not None:
+        sample = [get_model()(causes[i]) for i in range(0, batch_size)]
+    else:
+        sample = [get_model()() for _ in range(0, batch_size)]
 
     x, y = zip(*sample)
     y = torch.cat(y, 1).detach().squeeze(2)
